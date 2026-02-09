@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+google-genai
+chromadb
+python-multipart
+pypdf
+python-dotenv
+python-docx
+google-adk
+pandas
+openpyxl
+textract
+pywin32
+beautifulsoup4
+aiofiles
