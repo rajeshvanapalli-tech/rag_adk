@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Send } from 'lucide-react';
+import { Search, Send, Play, Pause, Pencil, Copy, RotateCcw, Check, Square } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
@@ -34,6 +34,12 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
     const [loading, setLoading] = useState(false);
     const [initialLoading, setInitialLoading] = useState(false);
     const [streamingMessage, setStreamingMessage] = useState('');
+    const [isPaused, setIsPaused] = useState(false);
+    const [editingIndex, setEditingIndex] = useState(null);
+    const [editText, setEditText] = useState('');
+    const [copyFeedbackIdx, setCopyFeedbackIdx] = useState(null);
+    const isPausedRef = useRef(false);
+    const stopStreamingRef = useRef(false);
     const messagesEndRef = useRef(null);
 
     const scrollToBottom = () => {
@@ -77,14 +83,20 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
         }
     };
 
-    const handleSendWithStreaming = async () => {
-        if (!input.trim()) return;
+    const handleSendWithStreaming = async (customMsg = null) => {
+        const userMsg = customMsg || input;
+        if (!userMsg.trim()) return;
 
-        const userMsg = input;
-        setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
-        setInput('');
+        if (!customMsg) {
+            setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+            setInput('');
+        }
+
         setLoading(true);
         setStreamingMessage('');
+        setIsPaused(false);
+        isPausedRef.current = false;
+        stopStreamingRef.current = false;
 
         try {
             const response = await fetch(`${API_BASE}/chat/stream`, {
@@ -113,6 +125,13 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
 
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
+                        // Handle Pause Logic
+                        while (isPausedRef.current) {
+                            await new Promise(r => setTimeout(r, 100));
+                            if (stopStreamingRef.current) break;
+                        }
+                        if (stopStreamingRef.current) break;
+
                         try {
                             const data = JSON.parse(line.slice(6));
 
@@ -147,15 +166,54 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
                 }
             }
         } catch (err) {
-            console.error(err);
-            setMessages(prev => [...prev, {
-                role: 'bot',
-                text: "Sorry, I encountered an error. Please try again.",
-                agent: "System"
-            }]);
+            if (err.name === 'AbortError') {
+                console.log('Stream stopped by user');
+            } else {
+                console.error(err);
+                setMessages(prev => [...prev, {
+                    role: 'bot',
+                    text: "Sorry, I encountered an error. Please try again.",
+                    agent: "System"
+                }]);
+            }
         } finally {
             setLoading(false);
+            setStreamingMessage('');
+            setIsPaused(false);
+            isPausedRef.current = false;
         }
+    };
+
+    const handleStop = () => {
+        stopStreamingRef.current = true;
+        setIsPaused(false);
+        isPausedRef.current = false;
+    };
+
+    const togglePause = () => {
+        const newState = !isPaused;
+        setIsPaused(newState);
+        isPausedRef.current = newState;
+    };
+
+
+    const handleCopy = (text, idx) => {
+        navigator.clipboard.writeText(text);
+        setCopyFeedbackIdx(idx);
+        setTimeout(() => setCopyFeedbackIdx(null), 2000);
+    };
+
+    const startEditing = (idx, text) => {
+        setEditingIndex(idx);
+        setEditText(text);
+    };
+
+    const handleUpdateEdit = () => {
+        if (!editText.trim()) return;
+        const newMessages = messages.slice(0, editingIndex);
+        setMessages(newMessages);
+        setEditingIndex(null);
+        handleSendWithStreaming(editText);
     };
 
     if (initialLoading) {
@@ -167,8 +225,34 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
             <div className="messages-list">
                 {messages.map((msg, idx) => (
                     <div key={idx} className={`message ${msg.role}`}>
-                        <div className="message-content">
-                            {renderTextWithLinks(msg.text)}
+                        <div className="message-content-wrapper">
+                            {editingIndex === idx ? (
+                                <div className="edit-container">
+                                    <textarea
+                                        value={editText}
+                                        onChange={e => setEditText(e.target.value)}
+                                        className="edit-textarea"
+                                    />
+                                    <div className="edit-actions">
+                                        <button className="edit-btn update" onClick={handleUpdateEdit}>Update</button>
+                                        <button className="edit-btn cancel" onClick={() => setEditingIndex(null)}>Cancel</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="message-content">
+                                    {renderTextWithLinks(msg.text)}
+                                    <div className="message-actions">
+                                        {msg.role === 'user' && (
+                                            <button className="action-icon" onClick={() => startEditing(idx, msg.text)} title="Edit prompt">
+                                                <Pencil size={16} />
+                                            </button>
+                                        )}
+                                        <button className="action-icon" onClick={() => handleCopy(msg.text, idx)} title="Copy content">
+                                            {copyFeedbackIdx === idx ? <Check size={16} /> : <Copy size={16} />}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                         {msg.role === 'bot' && (
                             <div className="message-meta">
@@ -179,9 +263,11 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
                 ))}
                 {streamingMessage && (
                     <div className="message bot">
-                        <div className="message-content">
-                            {renderTextWithLinks(streamingMessage)}
-                            <span className="cursor">▊</span>
+                        <div className="message-content-wrapper">
+                            <div className="message-content">
+                                {renderTextWithLinks(streamingMessage)}
+                                <span className="cursor">▊</span>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -189,17 +275,36 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
                 <div ref={messagesEndRef} />
             </div>
             <div className="input-area">
-                <input
-                    type="text"
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyPress={e => e.key === 'Enter' && handleSendWithStreaming()}
-                    placeholder="Ask anything (HR or Product)..."
-                    className="chat-input"
-                />
-                <button className="send-btn" onClick={handleSendWithStreaming}>
-                    <Send size={20} />
-                </button>
+                <div className="input-wrapper">
+                    <div className="input-prefix">
+                        <Search size={18} color="#94a3b8" />
+                    </div>
+                    <input
+                        type="text"
+                        value={input}
+                        onChange={e => setInput(e.target.value)}
+                        onKeyPress={e => e.key === 'Enter' && !loading && handleSendWithStreaming()}
+                        placeholder="Search HR Policies or Products..."
+                        className="chat-input"
+                        disabled={loading && !isPaused}
+                    />
+                    <div className="input-actions">
+                        {loading ? (
+                            <>
+                                <button className="input-action-btn" onClick={togglePause} title={isPaused ? "Resume" : "Pause"}>
+                                    {isPaused ? <Play size={20} /> : <Pause size={20} />}
+                                </button>
+                                <button className="input-action-btn stop" onClick={handleStop} title="Stop generation">
+                                    <Square size={18} fill="currentColor" />
+                                </button>
+                            </>
+                        ) : (
+                            <button className="send-btn" onClick={() => handleSendWithStreaming()} disabled={!input.trim()} title="Send Message">
+                                <Send size={18} color="white" fill="white" />
+                            </button>
+                        )}
+                    </div>
+                </div>
             </div>
         </div>
     );

@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { MessageSquare, Clock, Plus, Search, Trash2 } from 'lucide-react';
+import { MessageSquare, Clock, Plus, Search, Trash2, PanelLeftClose } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
-const ChatHistory = ({ onSelectConversation, onNewChat, currentConversationId, refreshTrigger }) => {
+const ChatHistory = ({ onSelectConversation, onNewChat, currentConversationId, refreshTrigger, toggleSidebar }) => {
     const [conversations, setConversations] = useState([]);
     const [loading, setLoading] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -49,10 +49,22 @@ const ChatHistory = ({ onSelectConversation, onNewChat, currentConversationId, r
 
     return (
         <div className="history-panel">
+            <div className="sidebar-brand">
+                <img src="/logo.png" alt="RITE Logo" className="sidebar-logo" />
+                <span className="sidebar-title">RITE Intelligence</span>
+                <button
+                    className="sidebar-close-btn"
+                    onClick={toggleSidebar}
+                    title="Close Sidebar"
+                    style={{ marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', padding: '4px', display: 'flex' }}
+                >
+                    <PanelLeftClose size={20} color="#64748b" />
+                </button>
+            </div>
+
             <div className="history-header">
-                <h3><Clock size={16} /> Recent Chats</h3>
                 <button className="new-chat-btn" onClick={onNewChat}>
-                    <Plus size={16} /> New Chat
+                    <Plus size={18} /> New Chat
                 </button>
             </div>
 
