@@ -1,7 +1,5 @@
-import os
-from google.adk.agents import LlmAgent
 from .openai_agent import OpenAIAgent
-
+from .gemini_agent import GeminiAgent
 from core.llm import get_llm, OpenAILLM, GoogleLLM
 
 def create_agent(name, description, instruction, tools):
@@ -19,11 +17,19 @@ def create_agent(name, description, instruction, tools):
             llm=llm
         )
     
-    # Default to Gemini/Google ADK native agent
-    return LlmAgent(
+    if isinstance(llm, GoogleLLM):
+        return GeminiAgent(
+            name=name,
+            description=description,
+            instruction=instruction,
+            tools=tools,
+            llm=llm
+        )
+    
+    # Fallback/Default
+    return GeminiAgent(
         name=name,
         description=description,
-        model=llm.model_name,
         instruction=instruction,
         tools=tools
     )

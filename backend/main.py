@@ -294,30 +294,17 @@ async def chat_stream(request: ChatRequest):
             new_msg_obj = SimpleContent(role='user', parts=[SimplePart(text=query)])
             
             full_response = ""
-            from core.llm import OpenAILLM
-            
-            if isinstance(agent.llm if hasattr(agent, 'llm') else None, OpenAILLM):
-                async for event in agent.run_async(
-                    user_id=user_id,
-                    session_id=conversation_id,
-                    new_message=new_msg_obj
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                full_response += part.text
-                                yield f"data: {json.dumps({'type': 'content', 'text': part.text})}\n\n"
-            else:
-                async for event in rite_runner.run_async(
-                    user_id=user_id,
-                    session_id=conversation_id,
-                    new_message=new_msg_obj
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                full_response += part.text
-                                yield f"data: {json.dumps({'type': 'content', 'text': part.text})}\n\n"
+            # Call the agent's run_async method (now unified for both OpenAI and Gemini)
+            async for event in agent.run_async(
+                user_id=user_id,
+                session_id=conversation_id,
+                new_message=new_msg_obj
+            ):
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.text:
+                            full_response += part.text
+                            yield f"data: {json.dumps({'type': 'content', 'text': part.text})}\n\n"
             
             if not full_response:
                 full_response = "I processed your request but couldn't generate a specific response."
