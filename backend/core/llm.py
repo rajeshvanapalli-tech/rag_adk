@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class BaseLLM(ABC):
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        pass
+
     @abstractmethod
     def generate_content(self, prompt: str) -> str:
         pass
@@ -18,14 +23,28 @@ class BaseLLM(ABC):
 class GoogleLLM(BaseLLM):
     def __init__(self):
         import google.generativeai as genai
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("GOOGLE_API_KEY environment variable not set")
+        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self._model_name = os.getenv("GEMINI_MODEL") or os.getenv("GEMINI_MODEL_NAME")
         
-        genai.configure(api_key=api_key)
-        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-        self.model = genai.GenerativeModel(self.model_name)
-        self.embedding_model = 'models/gemini-embedding-001'
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
+        
+        if not self._model_name:
+            # Note: We do not hardcode a fallback as per instructions.
+            # If the user hasn't provided it, we let the SDK attempt initialization
+            # or report it as part of provider initialization failure.
+            pass
+
+        try:
+            genai.configure(api_key=self.api_key)
+            self.model = genai.GenerativeModel(self._model_name) if self._model_name else None
+            self.embedding_model = 'models/gemini-embedding-001'
+        except Exception as e:
+            raise RuntimeError(f"Google Gemini Provider Initialization Failed: {str(e)}")
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name or "unspecified"
 
     def _retry_on_429(self, func, *args, **kwargs):
         max_retries = 3
@@ -44,6 +63,8 @@ class GoogleLLM(BaseLLM):
                 raise e
 
     def generate_content(self, prompt: str) -> str:
+        if not self.model:
+            return "Error: Gemini model not configured. Please set GEMINI_MODEL in .env."
         try:
             response = self._retry_on_429(self.model.generate_content, prompt)
             if not response or not response.text:
@@ -51,7 +72,7 @@ class GoogleLLM(BaseLLM):
             return response.text
         except Exception as e:
             print(f"LLM Generation Error: {e}")
-            return f"Error: {str(e)}"
+            return f"Error: Provider failed to generate content. {str(e)}"
 
     def get_embedding(self, text: str, task_type: str = "retrieval_document") -> list[float]:
         import google.generativeai as genai
@@ -70,29 +91,39 @@ class GoogleLLM(BaseLLM):
 class OpenAILLM(BaseLLM):
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
-        self.model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
+        self._model_name = os.getenv("OPENAI_MODEL")
         self.embedding_model = "text-embedding-3-small"
         self._client = None
+        
+        if not self.api_key or self.api_key == "your_openai_api_key_here":
+            raise ValueError("OPENAI_API_KEY environment variable not set correctly.")
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name or "unspecified"
 
     @property
     def client(self):
         if self._client is None:
-            if not self.api_key or self.api_key == "your_openai_api_key_here":
-                raise ValueError("OPENAI_API_KEY environment variable not set correctly. Please update your .env file.")
-            from openai import OpenAI
-            self._client = OpenAI(api_key=self.api_key)
+            try:
+                from openai import OpenAI
+                self._client = OpenAI(api_key=self.api_key)
+            except Exception as e:
+                raise RuntimeError(f"OpenAI Provider Initialization Failed: {str(e)}")
         return self._client
 
     def generate_content(self, prompt: str) -> str:
+        if not self._model_name:
+            return "Error: OpenAI model not configured. Please set OPENAI_MODEL in .env."
         try:
             response = self.client.chat.completions.create(
-                model=self.model_name,
+                model=self._model_name,
                 messages=[{"role": "user", "content": prompt}]
             )
             return response.choices[0].message.content
         except Exception as e:
             print(f"OpenAI Generation Error: {e}")
-            return f"Error: {str(e)}"
+            return f"Error: Provider failed to generate content. {str(e)}"
 
     def get_embedding(self, text: str, task_type: str = "retrieval_document") -> list[float]:
         try:
@@ -106,8 +137,50 @@ class OpenAILLM(BaseLLM):
             print(f"OpenAI Embedding Error: {e}")
             return [0.0] * 1536
 
+class NoLLM(BaseLLM):
+    @property
+    def model_name(self) -> str:
+        return "none"
+        
+    def generate_content(self, prompt: str) -> str:
+        return "No valid LLM API key found. Please configure OpenAI or Gemini in the .env file."
+    def get_embedding(self, text: str, task_type: str = "retrieval_document") -> list[float]:
+        return [0.0] * 768
+
 def get_llm() -> BaseLLM:
-    provider = os.getenv("MODEL_PROVIDER", "google").lower()
-    if provider == "openai":
-        return OpenAILLM()
-    return GoogleLLM()
+    """
+    STRICT ROUTING LOGIC:
+    1. If OPENAI_API_KEY is present -> Use OpenAI.
+    2. Else if GEMINI_API_KEY is present -> Use Gemini.
+    3. If neither -> Return NoLLM with custom message.
+    """
+    # Prefer OpenAI by default
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key and openai_key != "your_openai_api_key_here" and openai_key.strip():
+        try:
+            return OpenAILLM()
+        except Exception as e:
+            # Initialization failure logic
+            class ErrorLLM(BaseLLM):
+                @property
+                def model_name(self) -> str: return "error"
+                def generate_content(self, p): return f"OpenAI initialization failed: {str(e)}. Please verify your API key."
+                def get_embedding(self, t, k): return [0.0] * 1536
+            return ErrorLLM()
+    
+    # Priority 2: Gemini
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if gemini_key and gemini_key.strip():
+        try:
+            return GoogleLLM()
+        except Exception as e:
+            # Initialization failure logic
+            class ErrorLLM(BaseLLM):
+                @property
+                def model_name(self) -> str: return "error"
+                def generate_content(self, p): return f"Gemini initialization failed: {str(e)}. Please verify your API key."
+                def get_embedding(self, t, k): return [0.0] * 768
+            return ErrorLLM()
+
+    # Fallback: No key
+    return NoLLM()

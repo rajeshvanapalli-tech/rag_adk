@@ -13,3 +13,5 @@ textract
 pywin32
 beautifulsoup4
 aiofiles
+litellm
+requests

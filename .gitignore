@@ -17,12 +17,20 @@ build/
 *.env
 
 # Database
+chroma_data/
 chroma_db/
 *.db
 *.sqlite
 
 # Uploads and static files
 uploads/
+backend/uploads/
+backend/chroma_data/
+backend/conversations.json
+backend/sessions.json
+frontend/node_modules/
+backend/.env
+frontend/.env
 static/images/
 
 # Session data

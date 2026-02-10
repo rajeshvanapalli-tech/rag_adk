@@ -6,10 +6,12 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from google.adk.runners import Runner
 from core.persistent_session_service import PersistentSessionService
 from google.adk.sessions import Session
-import google.generativeai as genai
 
 from core.loader import load_file, load_file_with_structure
 from core.chunker import chunk_text
@@ -33,13 +35,18 @@ app.add_middleware(
 
 # Initialize Components
 vector_store = VectorStore()
+
 session_service = PersistentSessionService(storage_path="sessions.json")
 session_manager = SessionManager()
+
+# Initialize Single Active Agent based on Environment
+from agents.master_agent import create_master_agent
+agent = create_master_agent()
 
 # Initialize Unified Mastery Runner
 rite_runner = Runner(
     app_name="rite_unified",
-    agent=master_agent,
+    agent=agent,
     session_service=session_service,
     auto_create_session=True
 )
@@ -52,6 +59,52 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+async def sync_vector_store():
+    """Background task to sync disk files with current LLM index."""
+    print(f"Starting Smart Sync for {vector_store.provider}...")
+    try:
+        indexed_files = vector_store.get_indexed_sources()
+        on_disk_files = []
+        if os.path.exists(UPLOAD_DIR):
+            on_disk_files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
+        
+        missing = [f for f in on_disk_files if f not in indexed_files]
+        
+        if not missing:
+            print("Knowledge Base is already up-to-date.")
+            return
+
+        print(f"Found {len(missing)} documents on disk not indexed for {vector_store.provider}. Re-indexing now...")
+        dynamic_chunker = DynamicChunker()
+        
+        for filename in missing:
+            try:
+                filepath = os.path.join(UPLOAD_DIR, filename)
+                text_content = load_file(filepath)
+                # Use intelligent detection instead of just filename check
+                category = dynamic_chunker.detect_document_type(text_content)
+                
+                chunks = dynamic_chunker.chunk(text_content)
+                
+                if chunks:
+                    file_id = filename.split('_')[0] if '_' in filename else str(uuid.uuid4())
+                    vector_store.add_documents(
+                        documents=chunks,
+                        metadatas=[{"source": filename, "category": category} for _ in chunks],
+                        ids=[f"{file_id}_{i}" for i in range(len(chunks))]
+                    )
+                    print(f"Successfully synced: {filename} as {category}")
+            except Exception as e:
+                print(f"Failed to sync {filename}: {e}")
+    except Exception as general_err:
+        print(f"Smart Sync failed: {general_err}")
+
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    # Run sync in the background so app starts quickly
+    asyncio.create_task(sync_vector_store())
 
 class ChatRequest(BaseModel):
     query: str
@@ -67,8 +120,7 @@ async def test_llm():
     try:
         from core.llm import get_llm
         llm = get_llm()
-        response = llm.generate_content("Hello, can you hear me?")
-        # Handle the fact that OpenAILLM might not have .model.model_name in the same way
+        response = llm.generate_content("Hello from RITE AI Router!")
         model_name = getattr(llm, 'model_name', 'unknown')
         return {"status": "success", "response": response, "model": model_name}
     except Exception as e:
@@ -113,11 +165,15 @@ async def upload_document(
                  results.append({"filename": file.filename, "status": "failed", "error": "No text content found or chunking failed."})
                  continue
 
-            vector_store.add_documents(
-                documents=chunks, 
-                metadatas=[{"source": filename, "category": category} for _ in chunks], 
-                ids=[f"{file_id}_{i}" for i in range(len(chunks))]
-            )
+            # Index for currently active provider
+            try:
+                vector_store.add_documents(
+                    documents=chunks, 
+                    metadatas=[{"source": filename, "category": category} for _ in chunks], 
+                    ids=[f"{file_id}_{i}" for i in range(len(chunks))]
+                )
+            except Exception as e:
+                print(f"Index error: {e}")
             
             results.append({"filename": file.filename, "status": "success", "chunks": len(chunks)})
         except Exception as e:
@@ -154,17 +210,16 @@ async def chat_unified(request: ChatRequest):
         session_manager.update_timestamp(conversation_id)
         full_response = ""
         try:
+            # Record in chat history
             vector_store.add_chat_history(user_id, "user", query, time.time(), conversation_id)
             
-            # Using conversation_id string as session_id for the runner
             # WRAP new_message in Object, do NOT use dict
             new_msg_obj = SimpleContent(role='user', parts=[SimplePart(text=query)])
             
-            provider = os.getenv("MODEL_PROVIDER", "google").lower()
-            
-            if provider == "openai":
-                # Direct call to OpenAIAgent
-                async for event in master_agent.run_async(
+            from core.llm import OpenAILLM
+            if isinstance(agent.llm if hasattr(agent, 'llm') else None, OpenAILLM):
+                # Direct call for OpenAI
+                async for event in agent.run_async(
                     user_id=user_id,
                     session_id=conversation_id,
                     new_message=new_msg_obj
@@ -204,6 +259,83 @@ async def chat_unified(request: ChatRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"System Error: {str(e)}")
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Streaming endpoint for real-time chat responses."""
+    from fastapi.responses import StreamingResponse
+    import json
+    
+    async def generate():
+        try:
+            user_id = request.user_id
+            query = request.query
+            conversation_id = request.conversation_id
+            
+            if not conversation_id or conversation_id == "new":
+                title = query[:50] + "..." if len(query) > 50 else query
+                conversation = session_manager.create_conversation(user_id, title)
+                conversation_id = conversation["id"]
+            else:
+                conversation = session_manager.get_conversation(conversation_id)
+                if not conversation:
+                    conversation = session_manager.create_conversation(user_id, query[:50])
+                    conversation_id = conversation["id"]
+
+            session_manager.update_timestamp(conversation_id)
+            
+            # Send conversation metadata first
+            yield f"data: {json.dumps({'type': 'metadata', 'conversation_id': conversation_id, 'title': conversation['title']})}\n\n"
+            
+            # Record user message
+            vector_store.add_chat_history(user_id, "user", query, time.time(), conversation_id)
+            
+            # Create message object
+            new_msg_obj = SimpleContent(role='user', parts=[SimplePart(text=query)])
+            
+            full_response = ""
+            from core.llm import OpenAILLM
+            
+            if isinstance(agent.llm if hasattr(agent, 'llm') else None, OpenAILLM):
+                async for event in agent.run_async(
+                    user_id=user_id,
+                    session_id=conversation_id,
+                    new_message=new_msg_obj
+                ):
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                full_response += part.text
+                                yield f"data: {json.dumps({'type': 'content', 'text': part.text})}\n\n"
+            else:
+                async for event in rite_runner.run_async(
+                    user_id=user_id,
+                    session_id=conversation_id,
+                    new_message=new_msg_obj
+                ):
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                full_response += part.text
+                                yield f"data: {json.dumps({'type': 'content', 'text': part.text})}\n\n"
+            
+            if not full_response:
+                full_response = "I processed your request but couldn't generate a specific response."
+                yield f"data: {json.dumps({'type': 'content', 'text': full_response})}\n\n"
+            
+            # Save to history
+            vector_store.add_chat_history(user_id, "assistant", full_response, time.time(), conversation_id)
+            
+            # Send completion signal
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error_msg = f"Error: {str(e)}"
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.get("/conversations")
 async def list_conversations(user_id: str = "user_1"):
@@ -304,5 +436,4 @@ async def clear_all_files():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
- 
- 
+

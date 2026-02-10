@@ -630,3 +630,46 @@ body {
   border: 1px dashed var(--border-color);
   border-radius: 8px;
 }
+
+/* Streaming cursor animation */
+.cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background-color: #0ea5e9;
+  margin-left: 2px;
+  animation: blink 1s infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Link styling in messages */
+.message-content a {
+  color: #3b82f6;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+
+.message-content a:hover {
+  color: #2563eb;
+}
+
+.message.user .message-content a {
+  color: #bfdbfe;
+}
+
+.message.user .message-content a:hover {
+  color: #dbeafe;
+}

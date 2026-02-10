@@ -3,12 +3,12 @@ import json
 from core.llm import get_llm, OpenAILLM
 
 class OpenAIAgent:
-    def __init__(self, name, description, instruction, tools):
+    def __init__(self, name, description, instruction, tools, llm=None):
         self.name = name
         self.description = description
         self.instruction = instruction
         self.tools = {t.__name__: t for t in tools}
-        self.llm = OpenAILLM()
+        self.llm = llm if llm else OpenAILLM()
         
         # Prepare tool definitions for OpenAI
         self.openai_tools = []
@@ -55,19 +55,28 @@ class OpenAIAgent:
             messages.append(msg)
             
             if not msg.tool_calls:
-                # No more tools, we have the final answer
-                # Yield a dummy event object that main.py expects
-                class DummyEvent:
-                    def __init__(self, text):
-                        class Content:
-                            def __init__(self, text):
-                                class Part:
-                                    def __init__(self, text):
-                                        self.text = text
-                                self.parts = [Part(text)]
-                        self.content = Content(text)
+                # No more tools - stream the final answer
+                # Re-generate with streaming enabled
+                stream_response = self.llm.client.chat.completions.create(
+                    model=self.llm.model_name,
+                    messages=messages,
+                    stream=True  # Enable streaming
+                )
                 
-                yield DummyEvent(msg.content)
+                # Yield tokens as they arrive
+                for chunk in stream_response:
+                    if chunk.choices[0].delta.content:
+                        class DummyEvent:
+                            def __init__(self, text):
+                                class Content:
+                                    def __init__(self, text):
+                                        class Part:
+                                            def __init__(self, text):
+                                                self.text = text
+                                        self.parts = [Part(text)]
+                                self.content = Content(text)
+                        
+                        yield DummyEvent(chunk.choices[0].delta.content)
                 return
 
             # Handle tool calls

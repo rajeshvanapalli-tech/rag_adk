@@ -16,14 +16,19 @@ class UniversalEmbeddingFunction(EmbeddingFunction):
 
 class VectorStore:
     def __init__(self):
-        self.client = chromadb.PersistentClient(path="./chroma_db")
+        self.client = chromadb.PersistentClient(path="./chroma_data")
         self.llm = get_llm()
+        
+        # Determine provider name for collection isolation
+        from .llm import OpenAILLM
+        self._provider = "openai" if isinstance(self.llm, OpenAILLM) else "google"
+        
         self.embedding_fn_doc = UniversalEmbeddingFunction(self.llm, "retrieval_document")
         self.embedding_fn_query = UniversalEmbeddingFunction(self.llm, "retrieval_query")
 
     @property
     def provider(self):
-        return os.getenv("MODEL_PROVIDER", "google").lower()
+        return self._provider
 
     @property
     def collection(self):
@@ -62,6 +67,16 @@ class VectorStore:
         if results['documents']:
             return results['documents'][0]
         return []
+
+    def get_indexed_sources(self) -> set[str]:
+        """Returns a set of all source filenames currently in the vector store."""
+        try:
+            results = self.collection.get(include=["metadatas"])
+            if not results or not results['metadatas']:
+                return set()
+            return {m.get("source") for m in results['metadatas'] if m.get("source")}
+        except Exception:
+            return set()
 
     def search_as_tool(self, query: str, category: str = None) -> str:
         """
@@ -144,24 +159,28 @@ class VectorStore:
             print(f"Error deleting documents for {source_filename}: {e}")
 
     def clear_all_documents(self):
-        """Deletes all documents from the rag_docs collection."""
+        """Deletes all documents from the active provider's rag_docs collection."""
         try:
-            # We can't actually 'clear' a collection in Chroma easily without deleting/recreating
-            # or deleting every ID. Deleting and recreating is cleaner.
-            self.client.delete_collection("rag_docs")
-            self.client.get_or_create_collection(
-                name="rag_docs",
-                embedding_function=self.embedding_fn_doc
-            )
-            print("Cleared all rag_docs documents.")
+            col_name = f"rag_docs_{self.provider}"
+            self.client.delete_collection(col_name)
+            # Collection will be recreated lazily by the .collection property
+            print(f"Cleared all documents for provider: {self.provider}")
         except Exception as e:
-            print(f"Error clearing rag_docs: {e}")
+            print(f"Error clearing documents: {e}")
+
+    def get_document_count(self) -> int:
+        """Returns the number of documents in the active collection."""
+        try:
+            return self.collection.count()
+        except Exception:
+            return 0
 
     def reset_database(self):
-        """Resets the vector store by deleting collections."""
+        """Resets the vector store by deleting all RITE-related collections."""
         try:
-             self.client.delete_collection("rag_docs")
-             self.client.delete_collection("chat_history")
-             print("Vector collections deleted.")
+             for col in self.client.list_collections():
+                 if col.name.startswith(("rag_docs_", "chat_history_")):
+                     self.client.delete_collection(col.name)
+             print("All RITE vector collections deleted.")
         except Exception as e:
-             print(f"Error deleting collections: {e}")
+             print(f"Error resetting database: {e}")

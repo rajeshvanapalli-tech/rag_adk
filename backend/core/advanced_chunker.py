@@ -301,7 +301,7 @@ class DynamicChunker:
         
         # Detection patterns
         self.step_indicators = re.compile(
-            r'(?:step\s*\d+|navigate|click|select|configure|installation|setup|procedure)',
+            r'(?:step\s*\d+|navigate|click|select|configure|installation|setup|procedure|manual)',
             re.IGNORECASE
         )
         self.policy_indicators = re.compile(
