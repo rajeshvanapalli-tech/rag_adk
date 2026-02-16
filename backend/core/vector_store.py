@@ -9,10 +9,17 @@ class UniversalEmbeddingFunction(EmbeddingFunction):
         self.task_type = task_type
 
     def __call__(self, input: Documents) -> Embeddings:
-        embeddings = []
-        for text in input:
-            embeddings.append(self.llm.get_embedding(text, task_type=self.task_type))
-        return embeddings
+        # Optimization: Pass the entire list for batch embedding if supported by the provider
+        # This is much faster than one-by-one calls
+        try:
+            return self.llm.get_embedding(list(input), task_type=self.task_type)
+        except Exception as e:
+            print(f"Batch embedding failed: {e}. Falling back to sequential.")
+            embeddings = []
+            for text in input:
+                embeddings.append(self.llm.get_embedding(text, task_type=self.task_type))
+            return embeddings
+        
 
 class VectorStore:
     def __init__(self):
@@ -20,8 +27,14 @@ class VectorStore:
         self.llm = get_llm()
         
         # Determine provider name for collection isolation
-        from .llm import OpenAILLM
-        self._provider = "openai" if isinstance(self.llm, OpenAILLM) else "google"
+        # Determine provider name for collection isolation
+        from .llm import OpenAILLM, FallbackLLM
+        
+        real_llm = self.llm
+        if isinstance(real_llm, FallbackLLM):
+            real_llm = real_llm.primary
+            
+        self._provider = "openai" if isinstance(real_llm, OpenAILLM) else "google"
         
         self.embedding_fn_doc = UniversalEmbeddingFunction(self.llm, "retrieval_document")
         self.embedding_fn_query = UniversalEmbeddingFunction(self.llm, "retrieval_query")
@@ -54,7 +67,7 @@ class VectorStore:
             ids=ids
         )
 
-    def search(self, query: str, n_results: int = 7, filter_metadata: dict = None) -> list[str]:
+    def search(self, query: str, n_results: int = 3, filter_metadata: dict = None) -> list[str]:
         """Searches for relevant documents."""
         # We manually embed the query using the query-specific embedding function
         query_embeddings = self.embedding_fn_query([query])
@@ -88,8 +101,8 @@ class VectorStore:
         if not docs:
             return "No relevant information found in the knowledge base."
             
-        # Return only top 2 chunks to keep context focused and short
-        return "\n\n---\n\n".join(docs[:2])
+        # Return top 5 chunks to keep context comprehensive
+        return "\n\n---\n\n".join(docs[:5])
 
 
     def add_chat_history(self, user_id: str, role: str, content: str, timestamp: float, conversation_id: str = None):

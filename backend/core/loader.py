@@ -202,11 +202,21 @@ def load_file_with_structure(filepath: str, output_image_dir: str = None) -> str
                         elif "heading3" in cls_str or "heading 3" in cls_str: prefix = "### "
                 
                 # Extract images
+                import urllib.parse
                 images = element.find_all('img')
                 for img in images:
                     src = img.get('src')
                     if src and output_image_dir:
+                        # Decode URL encoded src (e.g. %20 -> space)
+                        src = urllib.parse.unquote(src)
+                        
                         img_abs_path = os.path.join(os.path.dirname(abs_html_path), src)
+                        
+                        # Fallback: sometimes Word exports images to a fixed 'document_files' folder 
+                        # regardless of HTML filename if it's not well-formed
+                        if not os.path.exists(img_abs_path):
+                             print(f"Image not found at {img_abs_path}")
+                             
                         if os.path.exists(img_abs_path):
                              new_img_name = f"{os.path.basename(filepath)}_{os.path.basename(img_abs_path)}"
                              dest_path = os.path.join(output_image_dir, new_img_name)

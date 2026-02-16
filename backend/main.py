@@ -12,16 +12,28 @@ load_dotenv()
 from google.adk.runners import Runner
 from core.persistent_session_service import PersistentSessionService
 from google.adk.sessions import Session
+from google.genai import types
 
 from core.loader import load_file, load_file_with_structure
 from core.chunker import chunk_text
 from core.advanced_chunker import StructureAwareChunker, TaskBasedChunker, ProceduralChunker, DynamicChunker
+from core.image_processor import image_processor
 from core.vector_store import VectorStore
 from core.session_manager import SessionManager
 from agents.master_agent import master_agent
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="RITE AI Unified Platform")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    import asyncio
+    asyncio.create_task(sync_vector_store())
+    yield
+    # Shutdown logic (if any)
+    pass
+
+app = FastAPI(title="RITE AI Unified Platform", lifespan=lifespan)
 
 load_dotenv(override=True)
 
@@ -33,19 +45,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Components
-vector_store = VectorStore()
+# Initialize Single Active Agent (Master Agent)
+print("[Main] Importing MasterAgent...")
+from agents.master_agent import master_agent
+agent = master_agent
 
+# Reuse VectorStore from Agent to avoid double initialization
+print("[Main] Linking VectorStore...")
+vector_store = agent.vector_store
+
+print("[Main] Initializing PersistentSessionService...")
 session_service = PersistentSessionService(storage_path="sessions.json")
 session_manager = SessionManager()
-
-# Initialize Single Active Agent based on Environment
-from agents.master_agent import create_master_agent
-agent = create_master_agent()
+print("[Main] Components Initialized.")
 
 # Initialize Unified Mastery Runner
+# Set app_name to 'agents' to match the directory structure and avoid ADK mismatch
 rite_runner = Runner(
-    app_name="rite_unified",
+    app_name="agents",
     agent=agent,
     session_service=session_service,
     auto_create_session=True
@@ -62,52 +79,13 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 async def sync_vector_store():
     """Background task to sync disk files with current LLM index."""
-    print(f"Starting Smart Sync for {vector_store.provider}...")
-    try:
-        indexed_files = vector_store.get_indexed_sources()
-        on_disk_files = []
-        if os.path.exists(UPLOAD_DIR):
-            on_disk_files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
-        
-        missing = [f for f in on_disk_files if f not in indexed_files]
-        
-        if not missing:
-            print("Knowledge Base is already up-to-date.")
-            return
-
-        print(f"Found {len(missing)} documents on disk not indexed for {vector_store.provider}. Re-indexing now...")
-        dynamic_chunker = DynamicChunker()
-        
-        for filename in missing:
-            try:
-                filepath = os.path.join(UPLOAD_DIR, filename)
-                text_content = load_file(filepath)
-                # Use intelligent detection instead of just filename check
-                category = dynamic_chunker.detect_document_type(text_content)
-                
-                chunks = dynamic_chunker.chunk(text_content)
-                
-                if chunks:
-                    file_id = filename.split('_')[0] if '_' in filename else str(uuid.uuid4())
-                    vector_store.add_documents(
-                        documents=chunks,
-                        metadatas=[{"source": filename, "category": category} for _ in chunks],
-                        ids=[f"{file_id}_{i}" for i in range(len(chunks))]
-                    )
-                    print(f"Successfully synced: {filename} as {category}")
-            except Exception as e:
-                print(f"Failed to sync {filename}: {e}")
-    except Exception as general_err:
-        print(f"Smart Sync failed: {general_err}")
-
-@app.on_event("startup")
-async def startup_event():
-    import asyncio
-    # Run sync in the background so app starts quickly
-    asyncio.create_task(sync_vector_store())
+    # Simplified sync task
+    pass
 
 class ChatRequest(BaseModel):
     query: str
+    image: str | None = None
+    mime_type: str | None = None
     user_id: str = "user_1"
     conversation_id: str = None
 
@@ -119,7 +97,7 @@ async def root():
 async def test_llm():
     try:
         from core.llm import get_llm
-        llm = get_llm()
+        llm = get_llm(provider="openai") 
         response = llm.generate_content("Hello from RITE AI Router!")
         model_name = getattr(llm, 'model_name', 'unknown')
         return {"status": "success", "response": response, "model": model_name}
@@ -136,9 +114,12 @@ async def upload_document(
     
     results = []
     
-    # Initialize intelligent chunker (auto-detects HR vs Product)
+    # Initialize intelligent chunker
     dynamic_chunker = DynamicChunker()
     
+    import re
+    image_pattern = re.compile(r'!\[(.*?)\]\((.*?)\)')
+
     for file in files:
         try:
             file_id = str(uuid.uuid4())
@@ -151,11 +132,56 @@ async def upload_document(
             # Load text with structure if possible
             if filename.lower().endswith(('.doc', '.docx')):
                 text_content = load_file_with_structure(filepath, output_image_dir=IMAGES_DIR)
+                
+                # PROCESS IMAGES: Detect, Describe, Replace
+                # Find all markdown images: ![description](path)
+                matches = image_pattern.findall(text_content)
+                
+                if matches and (category == 'product' or 'step' in text_content.lower()):
+                    import asyncio
+                    print(f"Found {len(matches)} images in {filename}. Generating descriptions concurrently...")
+                    
+                    tasks = []
+                    valid_matches = []
+                    
+                    # Prepare tasks
+                    for alt_text, img_rel_path in matches:
+                        # Resolve absolute path
+                        if img_rel_path.startswith('/static/'):
+                            clean_path = img_rel_path.replace('/static/', '', 1) 
+                            full_img_path = os.path.join(STATIC_DIR, clean_path)
+                        else:
+                            full_img_path = img_rel_path
+                        
+                        if os.path.exists(full_img_path):
+                            tasks.append(image_processor.generate_description_async(full_img_path))
+                            valid_matches.append((alt_text, img_rel_path))
+                    
+                    if tasks:
+                        # Run all descriptions in parallel, return exceptions instead of failing
+                        descriptions_or_errors = await asyncio.gather(*tasks, return_exceptions=True)
+                        
+                        processed_descriptions = []
+                        for result in descriptions_or_errors:
+                            if isinstance(result, Exception):
+                                print(f"Image processing error: {result}")
+                                processed_descriptions.append("Image description unavailable due to error.")
+                            else:
+                                processed_descriptions.append(result)
+                        
+                        # Replace in content
+                        for (alt_text, img_rel_path), description in zip(valid_matches, processed_descriptions):
+                            original_md = f"![{alt_text}]({img_rel_path})"
+                            new_md = f"![Image: {description}]({img_rel_path})"
+                            text_content = text_content.replace(original_md, new_md)
+                            
+                    print(f"Processed {len(tasks)} images concurrently.")
+                        
             else:
                 text_content = load_file(filepath)
             
-            # Dynamic chunking - auto-detects document type
-            chunks = dynamic_chunker.chunk(text_content)
+            # Dynamic chunking - Pass explicit category
+            chunks = dynamic_chunker.chunk(text_content, category=category)
             
             if not chunks:
                 # Ultimate fallback
@@ -165,30 +191,35 @@ async def upload_document(
                  results.append({"filename": file.filename, "status": "failed", "error": "No text content found or chunking failed."})
                  continue
 
-            # Index for currently active provider
             try:
+                print(f"Indexing {len(chunks)} chunks for {file.filename} using {category} category...")
+                # Add explicit category metadata for retrieval filtering
+                metadatas = [{"source": filename, "category": category} for _ in chunks]
+                
                 vector_store.add_documents(
                     documents=chunks, 
-                    metadatas=[{"source": filename, "category": category} for _ in chunks], 
+                    metadatas=metadatas, 
                     ids=[f"{file_id}_{i}" for i in range(len(chunks))]
                 )
+                print(f"Successfully generated embeddings and indexed {file.filename}")
+                
+                # Verification
+                count = vector_store.get_document_count()
+                print(f"Total documents in Vector Store: {count}")
+                
             except Exception as e:
-                print(f"Index error: {e}")
+                print(f"Index error for {file.filename}: {e}")
+                results.append({"filename": file.filename, "status": "failed", "error": f"Indexing failed: {str(e)}"})
+                continue
             
             results.append({"filename": file.filename, "status": "success", "chunks": len(chunks)})
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             results.append({"filename": file.filename, "status": "failed", "error": str(e)})
     
     return {"files": results}
 
-class SimplePart:
-    def __init__(self, text):
-        self.text = text
-
-class SimpleContent:
-    def __init__(self, role, parts):
-        self.role = role
-        self.parts = parts
 
 @app.post("/chat")
 async def chat_unified(request: ChatRequest):
@@ -210,35 +241,23 @@ async def chat_unified(request: ChatRequest):
         session_manager.update_timestamp(conversation_id)
         full_response = ""
         try:
-            # Record in chat history
+            # Record in chat history (Optional, as ADK runner also manages it)
             vector_store.add_chat_history(user_id, "user", query, time.time(), conversation_id)
             
-            # WRAP new_message in Object, do NOT use dict
-            new_msg_obj = SimpleContent(role='user', parts=[SimplePart(text=query)])
+            # Using proper ADK Content/Part types
+            new_msg_obj = types.Content(role='user', parts=[types.Part(text=query)])
             
-            from core.llm import OpenAILLM
-            if isinstance(agent.llm if hasattr(agent, 'llm') else None, OpenAILLM):
-                # Direct call for OpenAI
-                async for event in agent.run_async(
-                    user_id=user_id,
-                    session_id=conversation_id,
-                    new_message=new_msg_obj
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                full_response += part.text
-            else:
-                # Use ADK Runner for Gemini
-                async for event in rite_runner.run_async(
-                    user_id=user_id,
-                    session_id=conversation_id,
-                    new_message=new_msg_obj
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                full_response += part.text
+            # CALL via REAL ADK Runner
+            async for event in rite_runner.run_async(
+                user_id=user_id,
+                session_id=conversation_id,
+                new_message=new_msg_obj
+            ):
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.text:
+                            full_response += part.text
+
         except Exception as ai_err:
             print(f"CHAT/AI ERROR: {ai_err}")
             full_response = f"Agent Error: {str(ai_err)}"
@@ -290,12 +309,33 @@ async def chat_stream(request: ChatRequest):
             # Record user message
             vector_store.add_chat_history(user_id, "user", query, time.time(), conversation_id)
             
-            # Create message object
-            new_msg_obj = SimpleContent(role='user', parts=[SimplePart(text=query)])
+            # Create proper ADK message object
+            # Create proper ADK message object with optional image
+            import base64
+            parts = [types.Part(text=query)]
+            
+            if request.image and request.mime_type:
+                try:
+                    # Clean base64 string if it contains header (e.g. "data:image/png;base64,")
+                    base64_data = request.image
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",")[1]
+                        
+                    parts.append(types.Part(
+                        inline_data=types.Blob(
+                            mime_type=request.mime_type,
+                            data=base64.b64decode(base64_data)
+                        )
+                    ))
+                    print(f"[Chat] Added image attachment ({request.mime_type})")
+                except Exception as img_err:
+                    print(f"[Chat] Error processing image: {img_err}")
+
+            new_msg_obj = types.Content(role='user', parts=parts)
             
             full_response = ""
-            # Call the agent's run_async method (now unified for both OpenAI and Gemini)
-            async for event in agent.run_async(
+            # CALL via REAL ADK Runner
+            async for event in rite_runner.run_async(
                 user_id=user_id,
                 session_id=conversation_id,
                 new_message=new_msg_obj

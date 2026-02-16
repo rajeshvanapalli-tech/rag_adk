@@ -53,7 +53,6 @@ function App() {
 
         <main
           className="chat-window"
-          onClick={() => isSidebarOpen && setIsSidebarOpen(false)}
         >
           <ChatInterface
             conversationId={currentConversationId}

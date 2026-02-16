@@ -330,17 +330,20 @@ class DynamicChunker:
         else:
             return 'hr'
     
-    def chunk(self, text: str) -> List[str]:
+    def chunk(self, text: str, category: str = "auto") -> List[str]:
         """
-        Automatically detects document type and applies optimal chunking strategy.
+        Chunks text based on explicit category or auto-detection.
         """
-        doc_type = self.detect_document_type(text)
+        doc_type = category.lower()
+        
+        if doc_type not in ["hr", "product"]:
+            doc_type = self.detect_document_type(text)
         
         if doc_type == 'product':
-            print(f"[DynamicChunker] Detected: Product Manual → Using ProceduralChunker")
+            print(f"[DynamicChunker] Detected/Category: Product Manual -> Using ProceduralChunker")
             return self.procedural_chunker.chunk(text)
         else:
-            print(f"[DynamicChunker] Detected: HR Policy → Using StructureAwareChunker")
+            print(f"[DynamicChunker] Detected/Category: HR Policy -> Using StructureAwareChunker")
             return self.structure_chunker.chunk(text)
 
 
