@@ -15,3 +15,5 @@ beautifulsoup4
 aiofiles
 litellm
 requests
+langchain-text-splitters
+openai

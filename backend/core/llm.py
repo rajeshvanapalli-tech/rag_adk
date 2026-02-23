@@ -102,9 +102,11 @@ class GoogleLLM(BaseLLM):
             return embeddings if is_batch else embeddings[0]
 
         except Exception as e:
-            print(f"Embedding Failed for model {self.embedding_model}: {e}")
-            # Default fallback dimension for text-embedding-004
-            dim = 768
+            print(f"CRITICAL: Embedding Failed for model {self.embedding_model}: {e}")
+            # HARDCODED DIMENSIONS:
+            # gemini-embedding-001 -> 3072
+            # text-embedding-004 -> 768
+            dim = 3072 if "gemini-embedding-001" in str(self.embedding_model) else 768
             
             if isinstance(text, list):
                 return [[0.0] * dim for _ in text]
@@ -295,6 +297,7 @@ def get_llm(provider: str = None, task_type: str = "normal", complexity: str = "
     # Create secondary for runtime fallback
     secondary_provider_name = "gemini" if selected_provider == "openai" else "openai"
     secondary = create_instance(secondary_provider_name)
+
 
     if not primary:
         return secondary if secondary else NoLLM()
