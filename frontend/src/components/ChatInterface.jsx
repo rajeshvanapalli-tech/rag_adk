@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Search, Send, Play, Pause, Pencil, Copy, RotateCcw, Check, Square } from 'lucide-react';
+import { Search, Send, Play, Pause, Pencil, Copy, RotateCcw, Check, Square, Image as ImageIcon, X } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
@@ -38,9 +38,38 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
     const [editingIndex, setEditingIndex] = useState(null);
     const [editText, setEditText] = useState('');
     const [copyFeedbackIdx, setCopyFeedbackIdx] = useState(null);
+    const [selectedImage, setSelectedImage] = useState(null);
     const isPausedRef = useRef(false);
     const stopStreamingRef = useRef(false);
     const messagesEndRef = useRef(null);
+    const fileInputRef = useRef(null);
+
+    const handleImageSelect = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            if (!file.type.startsWith('image/')) {
+                alert('Please select an image file.');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                setSelectedImage({
+                    file: file,
+                    preview: e.target.result,
+                    base64: e.target.result, // This includes "data:image/png;base64,..."
+                    mimeType: file.type
+                });
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
+    const removeImage = () => {
+        setSelectedImage(null);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    };
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -88,8 +117,16 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
         if (!userMsg.trim()) return;
 
         if (!customMsg) {
-            setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+            setMessages(prev => {
+                const newMsg = { role: 'user', text: userMsg };
+                if (selectedImage) {
+                    newMsg.image = selectedImage.preview;
+                }
+                return [...prev, newMsg];
+            });
             setInput('');
+            setSelectedImage(null);
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
 
         setLoading(true);
@@ -106,6 +143,8 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
                 },
                 body: JSON.stringify({
                     query: userMsg,
+                    image: selectedImage ? selectedImage.base64 : null,
+                    mime_type: selectedImage ? selectedImage.mimeType : null,
                     user_id: "user_1",
                     conversation_id: conversationId || "new"
                 })
@@ -240,6 +279,11 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
                                 </div>
                             ) : (
                                 <div className="message-content">
+                                    {msg.image && (
+                                        <div className="message-image">
+                                            <img src={msg.image} alt="User upload" style={{ maxWidth: '200px', borderRadius: '8px', marginBottom: '8px' }} />
+                                        </div>
+                                    )}
                                     {renderTextWithLinks(msg.text)}
                                     <div className="message-actions">
                                         {msg.role === 'user' && (
@@ -276,9 +320,43 @@ const ChatInterface = ({ conversationId, onConversationUpdate }) => {
             </div>
             <div className="input-area">
                 <div className="input-wrapper">
-                    <div className="input-prefix">
-                        <Search size={18} color="#94a3b8" />
+                    <div className="input-prefix" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <button
+                            className="icon-btn"
+                            onClick={() => fileInputRef.current?.click()}
+                            title="Upload Image"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px' }}
+                        >
+                            <ImageIcon size={20} color="#94a3b8" />
+                        </button>
+                        <input
+                            type="file"
+                            ref={fileInputRef}
+                            style={{ display: 'none' }}
+                            accept="image/*"
+                            onChange={handleImageSelect}
+                        />
                     </div>
+                    {selectedImage && (
+                        <div className="image-preview-mini" style={{
+                            position: 'absolute',
+                            bottom: '100%',
+                            left: '20px',
+                            background: '#1e293b',
+                            padding: '8px',
+                            borderRadius: '8px 8px 0 0',
+                            border: '1px solid #334155',
+                            borderBottom: 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                        }}>
+                            <img src={selectedImage.preview} alt="Preview" style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '4px' }} />
+                            <button onClick={removeImage} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444' }}>
+                                <X size={16} />
+                            </button>
+                        </div>
+                    )}
                     <input
                         type="text"
                         value={input}
